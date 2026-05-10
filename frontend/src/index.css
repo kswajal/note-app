@@ -88,7 +88,8 @@
 
 .notion-editor p,
 .notion-editor li {
-  margin: 0.42rem 0;
+  margin: 0.15rem 0;
+  padding: 3px 0;
 }
 
 .notion-editor h2 {

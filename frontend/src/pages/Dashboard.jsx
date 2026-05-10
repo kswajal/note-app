@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion, AnimatePresence, Reorder } from "framer-motion";
 import {
   BookOpen,
   List,
@@ -58,6 +58,7 @@ const Dashboard = () => {
   const [noteToDelete, setNoteToDelete] = useState(null);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const autoSaveTimerRef = useRef(null);
+  const prevSectionRef = useRef(section);
 
   useEffect(() => {
     const fetchNotes = async () => {
@@ -107,9 +108,9 @@ const Dashboard = () => {
   const selectedNote = filteredNotes.find((note) => note._id === selectedId) || null;
 
   useEffect(() => {
-    if (showForm || !selectedNote) return;
+    if (showForm || !selectedNote || section === "settings") return;
     setForm({ title: selectedNote.title || "", content: selectedNote.content || "" });
-  }, [selectedId, showForm]);
+  }, [selectedId, showForm, section]);
 
   const handleSubmit = async (e) => {
     if (e && e.preventDefault) e.preventDefault();
@@ -134,9 +135,9 @@ const Dashboard = () => {
       setSection("all");
       toast.success("Note created");
       handleCloseForm();
-    } catch (error) {
-      console.error("Save note error:", error);
-      const msg = error.response?.data?.message || error.message || "Error saving note";
+    } catch (err) {
+      console.error(err);
+      const msg = err.response?.data?.message || err.message || "Error saving note";
       toast.error(msg);
     } finally {
       setCreating(false);
@@ -144,6 +145,7 @@ const Dashboard = () => {
   };
 
   const handleCloseForm = () => {
+    if (!showForm) return;
     setShowForm(false);
     setForm({ title: "", content: "" });
   };
@@ -155,7 +157,7 @@ const Dashboard = () => {
     let content = draft.content.trim();
 
     if (!title) {
-      toast.error("Title is required");
+      if (!options.silent) toast.error("Title is required");
       return false;
     }
 
@@ -169,9 +171,9 @@ const Dashboard = () => {
       setNotes((current) => current.map((currentNote) => (currentNote._id === note._id ? data : currentNote)));
       if (!options.silent) toast.success("Note saved");
       return true;
-    } catch (error) {
-      console.error("Save note error:", error);
-      const msg = error.response?.data?.message || error.message || "Error saving note";
+    } catch (err) {
+      console.error(err);
+      const msg = err.response?.data?.message || err.message || "Error saving note";
       toast.error(msg);
       return false;
     } finally {
@@ -185,7 +187,7 @@ const Dashboard = () => {
   };
 
   const flushPendingSelectedNote = async () => {
-    if (showForm || !selectedNote) return true;
+    if (showForm || !selectedNote || section === "settings") return true;
 
     const titleChanged = form.title !== (selectedNote.title || "");
     const contentChanged = form.content !== (selectedNote.content || "");
@@ -196,7 +198,17 @@ const Dashboard = () => {
   };
 
   useEffect(() => {
-    if (showForm || !selectedNote) return undefined;
+    if (showForm || !selectedNote || section === "settings") {
+      prevSectionRef.current = section;
+      return undefined;
+    }
+
+    // don't auto-save right after leaving settings
+    if (prevSectionRef.current === "settings") {
+      prevSectionRef.current = section;
+      return undefined;
+    }
+    prevSectionRef.current = section;
 
     const titleChanged = form.title !== (selectedNote.title || "");
     const contentChanged = form.content !== (selectedNote.content || "");
@@ -208,7 +220,7 @@ const Dashboard = () => {
     }, 900);
 
     return () => window.clearTimeout(autoSaveTimerRef.current);
-  }, [form.title, form.content, selectedNote, showForm]);
+  }, [form.title, form.content, selectedNote, showForm, section]);
 
   const handleToggleStar = async (id) => {
     try {
@@ -274,7 +286,7 @@ const Dashboard = () => {
                 setSelectedId(null);
                 setSection("all");
                 setShowForm(true);
-                setIsSidebarOpen(false);
+                if (window.innerWidth < 768) setIsSidebarOpen(false);
               }}
               className={`w-full flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition-all border ${
                 isDark
@@ -301,7 +313,7 @@ const Dashboard = () => {
                   if (!saved) return;
                   handleCloseForm();
                   setSection(key);
-                  setIsSidebarOpen(false);
+                  if (window.innerWidth < 768) setIsSidebarOpen(false);
                 }}
                 className={`flex items-center gap-2.5 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
                   section === key
@@ -321,26 +333,27 @@ const Dashboard = () => {
             </div>
           
             <div className="flex flex-col gap-0.5">
-              <AnimatePresence mode="popLayout">
+              <Reorder.Group axis="y" values={filteredNotes} onReorder={(reordered) => setNotes(reordered)} layoutScroll>
                 {filteredNotes.map((note) => {
                   const active = note._id === selectedId && section !== "settings";
                   return (
-                    <motion.button
-                      layout
+                    <Reorder.Item
+                      value={note}
+                      key={note._id}
                       initial={{ opacity: 0, y: 6 }}
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, scale: 0.97 }}
-                      key={note._id}
+                      whileDrag={{ scale: 1.02, boxShadow: "0 4px 16px rgba(0,0,0,0.15)" }}
                       onClick={async () => {
-                        if (note._id === selectedId) return;
+                        if (note._id === selectedId && section !== "settings") return;
                         const saved = await flushPendingSelectedNote();
                         if (!saved) return;
                         handleCloseForm();
                         setSelectedId(note._id);
                         if (section === "settings") setSection("all");
-                        setIsSidebarOpen(false);
+                        if (window.innerWidth < 768) setIsSidebarOpen(false);
                       }}
-                      className={`group relative flex flex-col items-start rounded-md px-3 py-2 text-left transition-colors duration-100 ${
+                      className={`group relative flex flex-col items-start rounded-md px-3 py-2 text-left transition-colors duration-100 cursor-grab active:cursor-grabbing ${
                         active
                           ? isDark ? "bg-zinc-800/80 text-zinc-100" : "bg-white text-zinc-900 shadow-sm"
                           : isDark ? "text-zinc-400 hover:bg-zinc-800/40 hover:text-zinc-200" : "text-zinc-600 hover:bg-zinc-200/50 hover:text-zinc-900"
@@ -355,10 +368,10 @@ const Dashboard = () => {
                       <span className="text-[11px] text-zinc-400/70 mt-0.5">
                         {formatDate(note.updatedAt)}
                       </span>
-                    </motion.button>
+                    </Reorder.Item>
                   );
                 })}
-              </AnimatePresence>
+              </Reorder.Group>
 
               {!loading && !filteredNotes.length && section !== "settings" ? (
                 <div className="flex flex-col items-center gap-3 px-3 py-8 text-center">

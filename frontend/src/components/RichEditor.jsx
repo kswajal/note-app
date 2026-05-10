@@ -3,9 +3,9 @@ import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import { Extension } from "@tiptap/core";
 import {
-  Bold, Italic, List, ListOrdered,
+  List, ListOrdered,
   Heading2, Braces, Heading3, Minus,
-  Pilcrow, Plus, Quote,
+  Pilcrow, Plus, Quote, GripVertical,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTheme } from "../context/ThemeContext";
@@ -50,7 +50,6 @@ const RichEditor = ({ content = "", onChange, placeholder = "Start writing..." }
   const { isDark } = useTheme();
   const editorWrapRef = useRef(null);
   const [blockMenu, setBlockMenu] = useState({ open: false, visible: false, top: 16 });
-  const [inlineMenu, setInlineMenu] = useState({ visible: false, top: 0, left: 0 });
 
   const editor = useEditor({
     extensions: [
@@ -92,32 +91,24 @@ const RichEditor = ({ content = "", onChange, placeholder = "Start writing..." }
     }
   }, [editor]);
 
-  const updateInlineMenuPosition = useCallback(() => {
-    if (!editor || !editorWrapRef.current || !editor.isFocused) {
-      setInlineMenu((current) => ({ ...current, visible: false }));
-      return;
-    }
+  const moveBlockToPosition = useCallback((fromIndex, gapIndex) => {
+    if (!editor) return;
+    const { state } = editor;
 
-    const { from, to, empty } = editor.state.selection;
-    if (empty) {
-      setInlineMenu((current) => ({ ...current, visible: false }));
-      return;
-    }
+    const blocks = [];
+    state.doc.forEach((node) => blocks.push(node));
 
-    try {
-      const start = editor.view.coordsAtPos(from);
-      const end = editor.view.coordsAtPos(to);
-      const wrapperRect = editorWrapRef.current.getBoundingClientRect();
-      const selectionCenter = (start.left + end.right) / 2;
+    const [moved] = blocks.splice(fromIndex, 1);
+    const targetIndex = gapIndex > fromIndex ? gapIndex - 1 : gapIndex;
+    blocks.splice(targetIndex, 0, moved);
 
-      setInlineMenu({
-        visible: true,
-        top: Math.max(4, start.top - wrapperRect.top - 42),
-        left: Math.max(0, selectionCenter - wrapperRect.left - 44),
-      });
-    } catch {
-      setInlineMenu((current) => ({ ...current, visible: false }));
-    }
+    const { tr } = state;
+    tr.replaceWith(0, state.doc.content.size, blocks);
+    editor.view.dispatch(tr.scrollIntoView());
+
+    let pos = 0;
+    for (let i = 0; i < targetIndex; i++) pos += tr.doc.child(i).nodeSize;
+    editor.commands.setTextSelection(pos + 1);
   }, [editor]);
 
   const blockActions = useMemo(() => ([
@@ -127,20 +118,6 @@ const RichEditor = ({ content = "", onChange, placeholder = "Start writing..." }
       icon: Pilcrow,
       active: () => editor?.isActive("paragraph"),
       action: () => editor?.chain().focus().setParagraph().run(),
-    },
-    {
-      label: "Bold",
-      hint: "Strong text",
-      icon: Bold,
-      active: () => editor?.isActive("bold"),
-      action: () => editor?.chain().focus().toggleBold().run(),
-    },
-    {
-      label: "Italic",
-      hint: "Emphasized text",
-      icon: Italic,
-      active: () => editor?.isActive("italic"),
-      action: () => editor?.chain().focus().toggleItalic().run(),
     },
     {
       label: "Heading 2",
@@ -199,9 +176,104 @@ const RichEditor = ({ content = "", onChange, placeholder = "Start writing..." }
     requestAnimationFrame(updateBlockMenuPosition);
   };
 
+  const handleGripDrag = useCallback((e) => {
+    e.preventDefault();
+    if (!editor || !editorWrapRef.current) return;
+
+    const { state } = editor;
+    const { $from } = state.selection;
+    const dragIndex = $from.index(0);
+    const wrapperRect = editorWrapRef.current.getBoundingClientRect();
+
+    // gap positions between blocks
+    const gaps = [];
+    let offset = 0;
+    for (let i = 0; i < state.doc.childCount; i++) {
+      try {
+        const coords = editor.view.coordsAtPos(offset);
+        gaps.push(coords.top - wrapperRect.top);
+      } catch {
+        gaps.push(i * 28);
+      }
+      offset += state.doc.child(i).nodeSize;
+    }
+    try {
+      const endCoords = editor.view.coordsAtPos(offset);
+      gaps.push(endCoords.top - wrapperRect.top);
+    } catch {
+      gaps.push((gaps[gaps.length - 1] || 0) + 28);
+    }
+
+    // drop indicator line
+    const line = document.createElement("div");
+    line.style.cssText =
+      "position:absolute;left:2rem;right:0;height:2px;background:#3b82f6;border-radius:1px;z-index:50;pointer-events:none;display:none;";
+    editorWrapRef.current.appendChild(line);
+
+    // ghost preview
+    const proseMirror = editorWrapRef.current.querySelector(".ProseMirror");
+    const blockDom = proseMirror?.children[dragIndex];
+    const ghost = document.createElement("div");
+    if (blockDom) {
+      ghost.textContent = blockDom.textContent;
+      ghost.style.cssText =
+        `position:fixed;pointer-events:none;z-index:999;opacity:0.7;
+         padding:4px 12px;border-radius:6px;font-size:0.95rem;max-width:320px;
+         white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+         background:${document.documentElement.classList.contains("dark") ? "#27272a" : "#f4f4f5"};
+         color:${document.documentElement.classList.contains("dark") ? "#e4e4e7" : "#18181b"};
+         box-shadow:0 4px 12px rgba(0,0,0,0.15);display:none;`;
+    }
+    document.body.appendChild(ghost);
+
+
+    if (blockDom) blockDom.style.opacity = "0.35";
+
+    let targetGap = dragIndex;
+
+    const onPointerMove = (moveEvent) => {
+
+      ghost.style.display = "block";
+      ghost.style.left = `${moveEvent.clientX + 12}px`;
+      ghost.style.top = `${moveEvent.clientY - 14}px`;
+
+      const pointerY = moveEvent.clientY - wrapperRect.top;
+      let closest = 0;
+      let minDist = Infinity;
+      for (let i = 0; i < gaps.length; i++) {
+        const dist = Math.abs(pointerY - gaps[i]);
+        if (dist < minDist) { minDist = dist; closest = i; }
+      }
+      targetGap = closest;
+
+      if (closest === dragIndex || closest === dragIndex + 1) {
+        line.style.display = "none";
+      } else {
+        line.style.display = "block";
+        line.style.top = `${gaps[closest]}px`;
+      }
+    };
+
+    const onPointerUp = () => {
+      window.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener("pointerup", onPointerUp);
+      line.remove();
+      ghost.remove();
+      if (blockDom) blockDom.style.opacity = "";
+
+      if (targetGap !== dragIndex && targetGap !== dragIndex + 1) {
+        moveBlockToPosition(dragIndex, targetGap);
+      }
+    };
+
+    window.addEventListener("pointermove", onPointerMove);
+    window.addEventListener("pointerup", onPointerUp);
+  }, [editor, moveBlockToPosition]);
+
   const handleEditorAreaClick = (event) => {
     if (!editor) return;
     if (event.target.closest(".ProseMirror")) return;
+    if (event.target.closest("button")) return;
 
     const lastBlock = editor.state.doc.lastChild;
     const shouldCreateLine = lastBlock && lastBlock.content.size > 0;
@@ -243,16 +315,12 @@ const RichEditor = ({ content = "", onChange, placeholder = "Start writing..." }
     if (!editor) return;
 
     const handleUpdate = () => {
-      requestAnimationFrame(() => {
-        updateBlockMenuPosition();
-        updateInlineMenuPosition();
-      });
+      requestAnimationFrame(updateBlockMenuPosition);
     };
     const handleBlur = () => {
       window.setTimeout(() => {
         if (!editorWrapRef.current?.contains(document.activeElement)) {
           setBlockMenu((current) => ({ ...current, visible: false, open: false }));
-          setInlineMenu((current) => ({ ...current, visible: false }));
         }
       }, 100);
     };
@@ -272,7 +340,7 @@ const RichEditor = ({ content = "", onChange, placeholder = "Start writing..." }
       window.removeEventListener("resize", handleUpdate);
       window.removeEventListener("scroll", handleUpdate, true);
     };
-  }, [editor, updateBlockMenuPosition, updateInlineMenuPosition]);
+  }, [editor, updateBlockMenuPosition]);
 
   if (!editor) return (
     <div className={`overflow-hidden rounded-xl border ${isDark ? "border-zinc-800 bg-zinc-950/50" : "border-zinc-200 bg-white"}`}>
@@ -288,72 +356,44 @@ const RichEditor = ({ content = "", onChange, placeholder = "Start writing..." }
       <div
         ref={editorWrapRef}
         onClick={handleEditorAreaClick}
-        className="relative min-h-[50vh] cursor-text scroll-smooth pb-28 pl-8 sm:pb-32 sm:pl-10"
+        className="relative min-h-[50vh] cursor-text scroll-smooth pb-28 pl-16 sm:pb-32 sm:pl-20"
       >
-        {inlineMenu.visible ? (
-          <div
-            className={`absolute z-30 flex items-center gap-1 rounded-lg border p-1 shadow-xl ${
-              isDark
-                ? "border-zinc-700 bg-zinc-900 text-zinc-100 shadow-black/30"
-                : "border-zinc-200 bg-white text-zinc-900 shadow-zinc-900/10"
-            }`}
-            style={{
-              top: `${inlineMenu.top}px`,
-              left: `min(${inlineMenu.left}px, calc(100% - 96px))`,
-            }}
-          >
-            <button
-              type="button"
-              title="Bold"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => editor.chain().focus().toggleBold().run()}
-              className={`flex h-8 w-8 items-center justify-center rounded-md transition-colors ${
-                editor.isActive("bold")
-                  ? isDark ? "bg-zinc-100 text-zinc-950" : "bg-zinc-900 text-white"
-                  : isDark ? "text-zinc-300 hover:bg-zinc-800" : "text-zinc-600 hover:bg-zinc-100"
-              }`}
-            >
-              <Bold size={15} strokeWidth={2.5} />
-            </button>
-            <button
-              type="button"
-              title="Italic"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => editor.chain().focus().toggleItalic().run()}
-              className={`flex h-8 w-8 items-center justify-center rounded-md transition-colors ${
-                editor.isActive("italic")
-                  ? isDark ? "bg-zinc-100 text-zinc-950" : "bg-zinc-900 text-white"
-                  : isDark ? "text-zinc-300 hover:bg-zinc-800" : "text-zinc-600 hover:bg-zinc-100"
-              }`}
-            >
-              <Italic size={15} strokeWidth={2.5} />
-            </button>
-          </div>
-        ) : null}
         {blockMenu.visible ? (
           <div
-            className="absolute z-20"
-            style={{ top: `${blockMenu.top}px`, left: "0px" }}
+            className="absolute z-20 flex items-center gap-2"
+            style={{ top: `${blockMenu.top}px`, left: "-2px" }}
           >
             <button
               type="button"
               title="Add block"
               aria-label="Add block"
-              aria-expanded={blockMenu.open}
               onMouseDown={(e) => e.preventDefault()}
               onClick={() => setBlockMenu((current) => ({ ...current, open: !current.open }))}
               className={`flex h-7 w-7 items-center justify-center rounded-md transition-all ${
                 isDark
-                  ? "text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
-                  : "text-zinc-400 hover:bg-zinc-100 hover:text-zinc-800"
+                  ? "text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300"
+                  : "text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
               }`}
             >
-              <Plus size={16} strokeWidth={2.4} />
+              <Plus size={18} strokeWidth={2} />
+            </button>
+            <button
+              type="button"
+              title="Drag to reorder"
+              aria-label="Drag to reorder"
+              onPointerDown={handleGripDrag}
+              className={`flex h-7 w-7 items-center justify-center rounded-md transition-all cursor-grab active:cursor-grabbing ${
+                isDark
+                  ? "text-zinc-600 hover:bg-zinc-800 hover:text-zinc-300"
+                  : "text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700"
+              }`}
+            >
+              <GripVertical size={18} strokeWidth={2} />
             </button>
 
             {blockMenu.open ? (
               <div
-                className={`mt-2 max-h-[60vh] w-[min(16rem,calc(100vw-4rem))] overflow-y-auto rounded-lg border p-1.5 shadow-2xl ${
+                className={`absolute left-0 top-full mt-2 max-h-[60vh] w-[min(16rem,calc(100vw-4rem))] overflow-y-auto rounded-lg border p-1.5 shadow-2xl ${
                   isDark
                     ? "border-zinc-800 bg-[#101012] text-zinc-100 shadow-black/40"
                     : "border-zinc-200 bg-white text-zinc-900 shadow-zinc-900/10"
